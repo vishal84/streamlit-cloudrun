@@ -1,0 +1,4 @@
+streamlit
+requests
+google-auth>=2.15.0
+cryptography

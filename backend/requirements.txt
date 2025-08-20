@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+google-cloud-discoveryengine>=0.8.0
+google-auth
+pydantic
+cryptography

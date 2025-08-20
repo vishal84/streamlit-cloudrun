@@ -1,0 +1,105 @@
+steps:
+  # 1. Build the backend Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Backend Image'
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-backend:${_TAG}', './backend']
+
+  # 2. Build the frontend Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Frontend Image'
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-frontend:${_TAG}', './frontend']
+
+  # 3. Push the backend image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Push Backend Image'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-backend:${_TAG}']
+    waitFor: ['Build Backend Image']
+
+  # 4. Push the frontend image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Push Frontend Image'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-frontend:${_TAG}']
+    waitFor: ['Build Frontend Image']
+
+  # 5. Deploy the backend Cloud Run service (initial deployment to get URL)
+  # allow unauthenticated for testing then switch to --no-allow-unauthenticated
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'Deploy Backend Service'
+    entrypoint: 'gcloud'
+    args:
+      - 'beta'
+      - 'run'
+      - 'deploy'
+      - 'ai-agent-backend'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-backend:${_TAG}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--service-account=backend-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--allow-unauthenticated'
+      - '--update-secrets=VERTEX_AI_DATASTORE_ID=vertex-ai-datastore-id:latest'
+      - '--set-env-vars=GCP_PROJECT_NUMBER=${_PROJECT_NUMBER},GCP_PROJECT=$PROJECT_ID'
+    waitFor: ['Push Backend Image']
+
+  # 6. Get backend URL, re-deploy backend with audience, then deploy frontend
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'Deploy Services with Correct Audience'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Get the URL of the newly deployed backend service
+        BACKEND_URL=$$(gcloud beta run services describe ai-agent-backend --platform=managed --region=${_REGION} --format='value(status.url)') && \
+        echo "Backend URL found: $$BACKEND_URL" && \
+        AUDIENCE="ai-agent-backend-5lp6rnt4va-uc.a.run.app"
+        
+        # Re-deploy the backend, this time setting its own URL as the AUDIENCE env var
+        gcloud beta run deploy ai-agent-backend \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-backend:${_TAG} \
+          --region=${_REGION} \
+          --platform=managed \
+          --service-account=backend-sa@$PROJECT_ID.iam.gserviceaccount.com \
+          --no-allow-unauthenticated \
+          --iap \
+          --update-secrets=VERTEX_AI_DATASTORE_ID=vertex-ai-datastore-id:latest \
+          --set-env-vars="GCP_PROJECT_NUMBER=${_PROJECT_NUMBER},GCP_PROJECT=$PROJECT_ID,AUDIENCE=$$AUDIENCE" && \
+
+        # Deploy the frontend, passing the backend URL to it
+        gcloud beta run deploy ai-agent-frontend \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-frontend:${_TAG} \
+          --region=${_REGION} \
+          --platform=managed \
+          --service-account=frontend-sa@$PROJECT_ID.iam.gserviceaccount.com \
+          --no-allow-unauthenticated \
+          --iap \
+          --set-env-vars="BACKEND_URL=$$BACKEND_URL,AUDIENCE=$$AUDIENCE"
+    waitFor: ['Push Frontend Image', 'Deploy Backend Service']
+
+  # # 7. Allow the frontend service to invoke the backend service
+  # - name: 'gcr.io/cloud-builders/gcloud'
+  #   id: 'Allow Frontend to Invoke Backend'
+  #   entrypoint: 'gcloud'
+  #   args:
+  #     - 'run'
+  #     - 'services'
+  #     - 'add-iam-policy-binding'
+  #     - 'ai-agent-backend'
+  #     - '--region=${_REGION}'
+  #     - '--member=serviceAccount:frontend-sa@$PROJECT_ID.iam.gserviceaccount.com'
+  #     - '--role=roles/run.invoker'
+  #   waitFor: ['Deploy Services with Correct Audience']
+
+# The 'images' block tells Cloud Build to store the final images
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-backend:${_TAG}'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/ai-agent-frontend:${_TAG}'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Added substitutions for reusability
+substitutions:
+  _PROJECT_NUMBER: '760897125660' # Replace with your project number
+  _REGION: 'us-central1'
+  _REPO_NAME: 'agent-repo'
+  # _TAG defaults to 'latest' for manual builds, but is replaced by $SHORT_SHA on triggered builds.
+  _TAG: 'latest'
